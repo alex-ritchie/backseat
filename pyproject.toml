@@ -1,0 +1,24 @@
+[project]
+name = "backseat"
+version = "0.1.0"
+description = "An ambient co-working partner that watches your screen and speaks up only when it has something useful to say"
+readme = "README.md"
+authors = [
+    { name = "alex-ritchie", email = "alex.ritchie.ml@gmail.com" },
+]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.6",
+    "mss>=9.0",
+    "Pillow>=10.0",
+    "numpy>=1.24",
+    "anthropic>=0.40",
+    "requests>=2.31",
+]
+
+# This is an application, not a library — tell uv not to try to build/install
+# the project itself, just manage the environment and dependencies.
+[tool.uv]
+package = false
