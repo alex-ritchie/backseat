@@ -11,10 +11,12 @@ Readiness = a 200 from /health. Failure = the process exiting before it became
 ready (bad -hf tag, out-of-memory, binary missing, ...). This is deliberately
 version-agnostic: we don't parse llama-server's log output, which changes.
 (Its download progress bar is also TTY-only, so it never reaches us through a
-pipe.) Download progress instead comes from watching the llama.cpp cache dir:
-weights are downloaded to `<file>.downloadInProgress` and renamed when done, so
-the temp file's size *is* the byte count. Totals come from the same Hugging
-Face manifest endpoint llama.cpp itself resolves repo:tag through.
+pipe.) Download progress instead comes from watching the Hugging Face hub
+cache that llama.cpp writes into (`<cache>/models--<org>--<repo>/blobs/`):
+weights are downloaded to `<sha256>.downloadInProgress` and renamed when done,
+so the temp file's size *is* the byte count. Totals and the blob→filename
+mapping come from the same HF manifest endpoint llama.cpp resolves repo:tag
+through.
 """
 from __future__ import annotations
 
@@ -39,13 +41,30 @@ PID_FILE = Path.home() / ".cache" / "backseat" / "llama-server.pid"
 
 
 def llama_cache_dir() -> Path:
-    """Replicate llama.cpp's fs_get_cache_dir() resolution order."""
-    env = os.environ.get("LLAMA_CACHE")
-    if env:
-        return Path(env)
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".cache"
-    return base / "llama.cpp"
+    """Replicate llama.cpp's hf_cache::get_cache_directory() resolution order.
+
+    Since llama.cpp moved `-hf` downloads into the Hugging Face hub layout,
+    the cache honours the same env vars as huggingface_hub (first set wins),
+    not just LLAMA_CACHE / XDG_CACHE_HOME.
+    """
+    candidates = (
+        ("LLAMA_CACHE", ()),
+        ("HF_HUB_CACHE", ()),
+        ("HUGGINGFACE_HUB_CACHE", ()),
+        ("HF_HOME", ("hub",)),
+        ("XDG_CACHE_HOME", ("huggingface", "hub")),
+    )
+    for var, suffix in candidates:
+        value = os.environ.get(var)
+        if value:
+            return Path(value).joinpath(*suffix)
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def repo_blobs_dir(hf_repo: str) -> Path:
+    """Where llama.cpp stages downloads for a `-hf` repo (tag stripped)."""
+    repo = hf_repo.partition(":")[0]
+    return llama_cache_dir() / ("models--" + repo.replace("/", "--")) / "blobs"
 
 
 class LlamaServerManager(QObject):
@@ -78,7 +97,9 @@ class LlamaServerManager(QObject):
         self._dl_timer = QTimer(self)
         self._dl_timer.setInterval(500)
         self._dl_timer.timeout.connect(self._scan_downloads)
-        self._file_sizes: dict[str, int] = {}  # manifest rfilename -> bytes
+        # manifest blob sha256 -> (rfilename, bytes)
+        self._file_sizes: dict[str, tuple[str, int]] = {}
+        self._blobs_dir = Path()  # set per launch from the preset's repo
         self._downloading = False
 
     # -- state queries -------------------------------------------------------
@@ -193,6 +214,7 @@ class LlamaServerManager(QObject):
         """Ask the HF manifest endpoint (the same one llama.cpp resolves
         repo:tag through) for file sizes, so download progress has a total."""
         repo, _, tag = preset.hf_repo.partition(":")
+        self._blobs_dir = repo_blobs_dir(preset.hf_repo)
         url = f"https://huggingface.co/v2/{repo}/manifests/{tag or 'latest'}"
         req = QNetworkRequest(QUrl(url))
         req.setRawHeader(b"User-Agent", b"llama-cpp")
@@ -209,10 +231,17 @@ class LlamaServerManager(QObject):
             manifest = json.loads(data)
             for entry_key in ("ggufFile", "mmprojFile"):
                 entry = manifest.get(entry_key)
-                if entry and entry.get("rfilename") and entry.get("size"):
-                    name = entry["rfilename"].rsplit("/", 1)[-1]
-                    self._file_sizes[name] = int(entry["size"])
-        except (ValueError, TypeError, KeyError):
+                if not (entry and entry.get("rfilename") and entry.get("size")):
+                    continue
+                name = entry["rfilename"].rsplit("/", 1)[-1]
+                # llama.cpp names blobs by the LFS sha256 (falling back to the
+                # git oid), so key by that to match the temp file on disk.
+                oid = (entry.get("lfs") or {}).get("sha256") or entry.get("oid")
+                if not oid:
+                    oid = str(entry.get("blobId", "")).removeprefix("sha256:")
+                if oid:
+                    self._file_sizes[oid] = (name, int(entry["size"]))
+        except (ValueError, TypeError, KeyError, AttributeError):
             pass  # no totals — the GUI falls back to an indeterminate bar
 
     def _scan_downloads(self) -> None:
@@ -220,8 +249,8 @@ class LlamaServerManager(QObject):
             self._dl_timer.stop()
             return
         try:
-            cache = llama_cache_dir()
-            temps = list(cache.rglob(f"*{_DL_SUFFIX}")) if cache.is_dir() else []
+            blobs = self._blobs_dir
+            temps = list(blobs.glob(f"*{_DL_SUFFIX}")) if blobs.is_dir() else []
             if temps:
                 # Downloads are sequential; the newest temp file is the active one.
                 tmp = max(temps, key=lambda p: p.stat().st_mtime)
@@ -229,11 +258,10 @@ class LlamaServerManager(QObject):
         except OSError:
             return  # scan raced the rename at download completion; next tick
         if temps:
-            name = tmp.name[: -len(_DL_SUFFIX)]
-            # Cache names embed the HF rfilename; match to get the total.
-            total = next(
-                (s for n, s in self._file_sizes.items() if n in name), 0
-            )
+            oid = tmp.name[: -len(_DL_SUFFIX)]
+            # Blobs are named by sha256; the manifest maps that back to a
+            # human filename and a total. Unknown blob → show the hash, no total.
+            name, total = self._file_sizes.get(oid, (oid[:12] + "…", 0))
             if not self._downloading:
                 self._downloading = True
                 self.status.emit("downloading weights…")

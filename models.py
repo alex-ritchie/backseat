@@ -42,6 +42,9 @@ PRESETS: list[ModelPreset] = [
         # (the backend passes it via chat_template_kwargs and sizes the token
         # budget accordingly).
         hf_repo="unsloth/Qwen3.8-27B-GGUF:Q4_K_M",
+        # Qwen3.8 ships an MTP head; 2 is the conservative starting point
+        # recommended by Unsloth, with 1-6 worth benchmarking per machine.
+        extra_args=["--spec-type", "draft-mtp", "--spec-draft-n-max", "2"],
     ),
     ModelPreset(
         key="qwen3vl-8b-q4",

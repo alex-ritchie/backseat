@@ -49,11 +49,15 @@ On startup the app launches the **default model** (Qwen3.8-27B, Q4) with:
 
 ```
 llama-server -hf unsloth/Qwen3.8-27B-GGUF:Q4_K_M --port 8080 \
-  --n-gpu-layers 99 --flash-attn on --jinja --ctx-size 8192
+  --n-gpu-layers 99 --flash-attn on --jinja --ctx-size 65536 \
+  --spec-type draft-mtp --spec-draft-n-max 2
 ```
 
 Note: this model needs a recent llama.cpp build (older CUDA builds mis-run its
-DeltaNet layers).
+DeltaNet layers). The MTP head uses extra memory, and `--spec-draft-n-max` is a
+hardware-dependent throughput/overhead tradeoff: `2` is the recommended starting
+point, but benchmarking values from `1` through `6` can find a better setting for
+your GPU. The selected GGUF repository must include an MTP head for this to work.
 
 The **Local model server** panel shows load status and lets you switch models:
 pick another entry in the dropdown and click **Change model** (only enabled when
